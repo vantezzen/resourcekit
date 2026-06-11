@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: resourcekit-postgres
+    restart: unless-stopped
+    ports:
+      - "54329:5432"
+    environment:
+      POSTGRES_USER: resourcekit
+      POSTGRES_PASSWORD: resourcekit
+      POSTGRES_DB: resourcekit
+    volumes:
+      - resourcekit-postgres:/var/lib/postgresql/data
+
+volumes:
+  resourcekit-postgres:
