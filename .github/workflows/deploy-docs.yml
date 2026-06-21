@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "src/**"
+      - "tsup.config.ts"
+      - "package.json"
       - "bun.lock"
       - ".github/workflows/deploy-docs.yml"
   workflow_dispatch:
@@ -14,7 +17,7 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one concurrent deployment, don't cancel an in-progress run.
+# Allow one concurrent deployment; don't cancel an in-progress run.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -27,16 +30,21 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.0"
+          bun-version: latest
 
-      - name: Install dependencies
+      - name: Install root dependencies
         run: bun install
-          bun run build
+
+      - name: Build library
+        run: bun run build
+
+      - name: Install docs dependencies
+        working-directory: docs
+        run: bun install
 
       - name: Build docs
-        run: cd docs
-          bun install
-          bun run build
+        working-directory: docs
+        run: bun run build
 
       - uses: actions/configure-pages@v5
 
@@ -53,3 +61,5 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+</content>
+</invoke>
