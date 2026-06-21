@@ -1,5 +1,8 @@
 {
   "compilerOptions": {
+    // tsup's dts builder sets baseUrl internally; TS6 deprecates it.
+    "ignoreDeprecations": "6.0",
+
     // Environment setup & latest features
     "lib": ["ESNext", "DOM"],
     "target": "ESNext",
@@ -9,6 +12,7 @@
     "allowJs": true,
 
     // Bundler mode
+    "types": ["bun"],
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
@@ -26,5 +30,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false,
   },
-  "include": ["src", "playground/src", "tsup.config.ts", "vitest.config.ts"],
+  "include": ["src", "tsup.config.ts"],
 }

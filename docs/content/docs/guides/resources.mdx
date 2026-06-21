@@ -1,0 +1,158 @@
+---
+title: Defining resources
+description: Resources are the typed, shared description of your app's data.
+---
+
+A **resource** describes one kind of data in your app: its shape, how it's identified, and the operations it supports. Resources live in shared code - both the client and the server import the same definition, which is how everything stays typed end to end.
+
+```ts
+import { z } from "zod";
+import { resource } from "resourcekit";
+
+export const issues = resource("issues", {
+  schema: z.object({
+    id: z.string(),
+    workspaceId: z.string(),
+    title: z.string(),
+    status: z.enum(["open", "closed"]),
+    assigneeId: z.string().nullable(),
+  }),
+});
+```
+
+That's a complete, usable resource. It gives you typed reads (`issues.where(...)`, `issues.one(id)`), typed writes (`issues.create(...)`, `issues.update(...)`, `issues.delete(...)`), and a contract the server validates every request against.
+
+## The schema
+
+The schema is a [Zod](https://zod.dev) object describing **one record**. It's used in three places:
+
+1. **Types** - everything you get back is `z.infer` of this schema.
+2. **Client-side validation** - writes fail fast, at the call site, before anything ships.
+3. **Server-side validation** - the server re-validates every record; the client is never trusted.
+
+### Client-generated ids
+
+Use a schema default for the identity field and `create()` callers can omit it:
+
+```ts
+id: z.string().default(() => crypto.randomUUID()),
+```
+
+Defaults work for any field - `status: z.enum(["open", "closed"]).default("open")` makes `status` optional at create time too. One schema, one source of truth.
+
+## Identity
+
+Records are addressed by their `id` field by default. If your data uses something else, say so:
+
+```ts
+export const files = resource("files", {
+  schema: FileSchema,
+  identity: "key",
+});
+```
+
+`files.one(...)`, `files.update(...)`, and friends are then typed against the `key` field.
+
+## Modes
+
+Not every resource is a database table. The `mode` tells the local cache how a resource behaves:
+
+| Mode | Behavior | Typical backing |
+| --- | --- | --- |
+| `collection` *(default)* | Records stored individually, fully queryable locally | Postgres rows |
+| `document` | One record by id, editable | A Redis hash, user settings |
+| `snapshot` | A whole result cached as one unit, replaced on refresh | A computed report |
+| `blob` | Large content addressed by id | An S3 object body |
+| `connection` | Never cached - always online | A live external feed |
+
+```ts
+export const usageReport = resource("usageReport", {
+  schema: UsageReportSchema,
+  mode: "snapshot",
+});
+```
+
+You'll rarely need anything beyond `collection`; reach for the others when the default caching behavior would be wrong for the data.
+
+## Supported operations
+
+By default a resource exposes all five operations - `one`, `where`, `create`, `update`, `delete`. But not every backing store can do all five: Stripe has no general query language, an S3 bucket can't `update` in place. Declare what a resource actually supports, and the unsupported operations **disappear from its type** - calling one is a compile error, never a method that throws at runtime:
+
+```ts
+export const customers = resource("customers", {
+  schema: CustomerSchema,
+  mode: "document",
+  supports: ["one", "create", "update", "delete"], // no `where`
+});
+
+customers.one("cus_1");   // ✅
+customers.where({ ... });  // ✗ Property 'where' does not exist
+```
+
+The server enforces the same list as a runtime backstop: a hand-built or stale-client plan for an unsupported operation is rejected with an [`unsupported`](/docs/reference/errors) error, never passed to the backbone.
+
+You rarely write `supports` by hand. Adapters for partial backbones ship **ready-made resources** with the schema, mode, and capabilities already set - so a partial integration is one call:
+
+```ts
+import { stripeCustomerResource } from "resourcekit/stripe/resources";
+
+export const customers = stripeCustomerResource();
+// customers.one / customers.update exist; customers.where does not.
+```
+
+Full backbones (Postgres, Prisma, MongoDB, SQLite, Redis) support everything, so their resources need no `supports` at all - the default is already right.
+
+## Versioning
+
+Add a numeric field and declare it, and concurrent edits to the same record **conflict cleanly instead of silently overwriting each other**:
+
+```ts
+export const issues = resource("issues", {
+  schema: IssueSchema.extend({ version: z.number().default(0) }),
+  version: "version",
+});
+```
+
+The runtime handles the rest - stamping, checking, bumping, and recovering. See [Conflicts](/docs/guides/conflicts) for how it behaves and what your UI should do.
+
+## Actions, relations, and queries
+
+Three more optional blocks complete a resource. Each has its own guide:
+
+```ts
+export const issues = resource("issues", {
+  schema: IssueSchema,
+
+  // Typed, named write operations → Writing data
+  actions: {
+    assign: action(z.object({ userId: z.string() }), ({ input }) => ({
+      assigneeId: input.userId,
+    })),
+  },
+
+  // Connections to other resources → Relations
+  relations: {
+    project: one(() => projects, "projectId"),
+  },
+
+  // Typed server-implemented reads → Reading data
+  queries: {
+    search: namedQuery(z.object({ text: z.string() }), z.array(IssueSchema)),
+  },
+});
+```
+
+## Keep it organized
+
+A pattern that scales well - one file per resource, one index that assembles the app:
+
+```text
+lib/data/
+  issues.ts        ← resource + schema
+  projects.ts
+  members.ts
+  index.ts         ← export const resources = [issues, projects, members] as const
+  engine.ts        ← export const appData = engine({ resources, ... })
+```
+
+The `appData` engine is the single source of truth: your client uses it directly, and the server is built from it with `server(appData, …)`. Because both sides share one engine, they can never list different resources or drift apart.

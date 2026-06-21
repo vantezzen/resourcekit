@@ -1,0 +1,15 @@
+{
+  "title": "Guides",
+  "defaultOpen": true,
+  "pages": [
+    "resources",
+    "querying",
+    "relations",
+    "writing-data",
+    "access-control",
+    "offline",
+    "conflicts",
+    "live-updates",
+    "bundles"
+  ]
+}

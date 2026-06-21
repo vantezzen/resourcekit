@@ -1,0 +1,111 @@
+---
+title: Access control
+description: Declare who sees what once - enforced on every read and every write.
+---
+
+ResourceKit's access model is one rule per resource, declared in the server config, enforced everywhere. There is no way to forget it: **a resource without an access rule refuses all requests.**
+
+```ts title="server"
+const resourceServer = server(appEngine, {
+  ctx: async (req: Request) => ({ user: await getUser(req) }),
+  resources: {
+    issues: {
+      backbone: drizzleBackbone(db, issuesTable),
+      access: (ctx) => ({ workspaceId: { in: ctx.user.workspaceIds } }),
+    },
+    publicDocs: {
+      backbone: drizzleBackbone(db, docsTable),
+      access: "public",
+    },
+  },
+});
+```
+
+An access rule is a function from your request context to a **scope** - a filter describing the records this caller may touch, in the same shape as a `where()` filter.
+
+## What one rule buys you
+
+The scope is applied to *every* operation on the resource, automatically:
+
+| Operation | Enforcement |
+| --- | --- |
+| List reads | The scope is AND-ed into the query - out-of-scope records are never returned, even if the client asks for them |
+| Single reads | An out-of-scope record reads as `null`, exactly like a missing one |
+| Creates | A record outside the caller's scope is refused |
+| Updates & actions | Checked against the **current** record *and* the patched result - you can't edit records you can't see, and you can't move a record out of your own scope |
+| Deletes | Checked against the current record |
+
+The client never even learns whether out-of-scope data exists. And because the rule lives next to the backbone, there's exactly one place to audit per resource.
+
+## The context
+
+`ctx` is yours: whatever your `ctx` resolver returns is what access rules (and action/query implementations) receive. Resolve your session once, pass what's needed:
+
+```ts
+ctx: async (req: Request) => {
+  const session = await getSession(req);
+  return { user: session.user, db };
+},
+```
+
+<Callout type="warn">
+Annotate the parameter - `ctx: async (req: Request) => …`. With an unannotated parameter, TypeScript can defer inference and your access rules end up typed against `unknown`.
+</Callout>
+
+Scopes can be async (`access: async (ctx) => ...`) and can express anything the filter language can:
+
+```ts
+// Per-tenant
+access: (ctx) => ({ tenantId: ctx.tenant.id }),
+
+// Ownership
+access: (ctx) => ({ ownerId: ctx.user.id }),
+
+// Multiple workspaces
+access: (ctx) => ({ workspaceId: { in: ctx.user.workspaceIds } }),
+```
+
+## Beyond scopes
+
+A scope expresses *row-level* access - "which records". Two situations call for more:
+
+**Per-operation rules** ("members can read, only admins can delete") belong in the operation itself. Throw from a server-only action:
+
+```ts
+actions: {
+  delete_: async ({ ctx }) => {
+    if (ctx.user.role !== "admin") {
+      throw new AccessDeniedError("Only admins can delete issues.");
+    }
+    // ...
+  },
+},
+```
+
+**Named queries** return arbitrary results, so the automatic scope can't be applied to them - the implementation receives `ctx` and is responsible for its own checks:
+
+```ts
+queries: {
+  search: async ({ input, ctx }) => {
+    if (!ctx.user.workspaceIds.includes(input.workspaceId)) return [];
+    return runSearch(input);
+  },
+},
+```
+
+## One cache per identity
+
+Access rules protect the server; the client cache is a separate concern. If your app can switch users without a full reload, give each identity its own engine (and its own `persist` name) so cached data never leaks between accounts:
+
+```ts
+const engines = new Map<string, Engine>();
+
+export function engineFor(userId: string) {
+  let cached = engines.get(userId);
+  if (!cached) {
+    cached = engine({ resources, persist: `my-app-${userId}` /* … */ });
+    engines.set(userId, cached);
+  }
+  return cached;
+}
+```

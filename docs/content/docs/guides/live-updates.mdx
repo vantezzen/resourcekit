@@ -1,0 +1,99 @@
+---
+title: Live updates
+description: Changes made anywhere appear everywhere - two lines of setup.
+---
+
+Out of the box, your own writes are instant everywhere in your own tab - but another user's edit (or your second browser window) only shows up when a query revalidates. Live updates close that gap: the server announces changes, and every connected client refreshes exactly the queries that care.
+
+Two lines:
+
+```ts title="server - mount the events endpoint next to POST"
+export const POST = resourceServer.POST;
+export const GET = resourceServer.events;   // /sync/events
+```
+
+```ts title="client"
+export const appData = engine({
+  resources,
+  endpoint: "/sync",
+  live: "/sync/events",
+});
+```
+
+Open two windows and edit in one - the other updates. No polling code, no socket management, no cache invalidation calls.
+
+## How it works
+
+Every accepted write makes the server emit a change notification. The events endpoint streams those notifications as **Server-Sent Events**; the client listens with a plain `EventSource` and refreshes the active queries reading the changed resource. Queries nobody is looking at don't refetch.
+
+The transport choice is deliberate: SSE is plain HTTP, works through proxies and serverless platforms, and `EventSource` **reconnects automatically**. The model is *short-lived connections, resumed forever* - not one immortal socket.
+
+### Serverless platforms (Vercel & friends)
+
+Two realities to plan for:
+
+- **Connection duration limits.** When the platform cuts the stream at its max duration, the browser quietly reconnects and the gap is bridged by the next refresh. You don't need to do anything - but don't expect a single connection to live for hours.
+- **Multiple instances.** The built-in change feed is in-process: it only sees writes handled by the *same* instance. On single-instance or long-lived servers (a Bun/Node process, a container) it's complete as-is. On multi-instance serverless, bridge the feed across instances with one line - `changes.syncVia(...)`.
+
+#### Bridging with Redis
+
+`redisChannel` works with `ioredis`, `node-redis`, and any managed Redis (Upstash, Redis Cloud, …). Pass a single client - it duplicates the connection for subscriber mode (a Redis connection in subscriber mode can't also publish):
+
+```ts title="server, at startup"
+import Redis from "ioredis";
+import { redisChannel } from "resourcekit/server";
+
+resourceServer.changes.syncVia(redisChannel(new Redis(process.env.REDIS_URL)));
+```
+
+That's it - changes from any instance now reach every connected client. `syncVia` tags each message with the publishing instance, so an instance never re-processes its own changes (no loops, no double-fires).
+
+On serverless, run the events route on the **Node runtime** (not Edge) so the Redis TCP connection is allowed - in Next.js, `export const runtime = "nodejs"` in the route. With `node-redis`, pass the two connections yourself (`redisChannel({ publisher, subscriber })`) and `await subscriber.connect()` first, since its duplicated client starts disconnected.
+
+#### Any other transport
+
+`syncVia` accepts any string pub/sub via the `channel(...)` helper - a websocket hub, a message queue, your realtime provider:
+
+```ts
+import { channel } from "resourcekit/server";
+
+resourceServer.changes.syncVia(
+  channel({
+    publish: (message) => hub.broadcast(message),
+    subscribe: (onMessage) => hub.onMessage(onMessage), // returns unsubscribe
+  }),
+);
+```
+
+If you need the raw feed (to log changes, or fan out by hand), `changes.subscribe(listener)` and `changes.emit(change)` are still there underneath.
+
+## Custom connectors
+
+`live` also accepts a function, so the notification channel can be anything - a websocket you already have, your realtime provider, even polling:
+
+```ts
+engine({
+  resources,
+  live: (onChange) => {
+    const channel = pusher.subscribe("changes");
+    channel.bind("change", onChange); // onChange({ resource: "issues" })
+    return () => channel.unbind("change", onChange);
+  },
+});
+```
+
+Whatever calls `onChange({ resource })` triggers the same targeted refresh.
+
+## Pairing with `staleTime`
+
+With live updates connected, mount-time revalidation becomes mostly redundant - the server tells you when things change. Turn it off and mounts become free:
+
+```ts
+engine({
+  resources,
+  live: "/sync/events",
+  staleTime: "forever",   // pushes drive freshness; mounts never refetch
+});
+```
+
+A middle ground (`staleTime: 30_000`) keeps a revalidation safety net while still eliminating refetch storms during navigation.

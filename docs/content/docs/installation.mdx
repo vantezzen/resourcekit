@@ -1,0 +1,190 @@
+---
+title: Installation
+description: From zero to your first synced query in three files.
+---
+
+import { Steps, Step } from "fumadocs-ui/components/steps";
+import { Tab, Tabs } from "fumadocs-ui/components/tabs";
+
+## Install
+
+<Tabs items={["bun", "pnpm", "npm"]}>
+
+<Tab value="bun">
+
+```bash
+bun add resourcekit zod
+```
+
+</Tab>
+
+<Tab value="pnpm">
+
+```bash
+pnpm add resourcekit zod
+```
+
+</Tab>
+
+<Tab value="npm">
+
+```bash
+npm install resourcekit zod
+```
+
+</Tab>
+
+</Tabs>
+
+ResourceKit's only required peer is [Zod](https://zod.dev), which you probably already have. React and Drizzle integrations activate automatically when those packages are present.
+
+## Set up your app
+
+A ResourceKit app is three small files: a **shared** resource definition, a **server** that serves it, and a **client** that uses it.
+
+<Steps>
+<Step>
+
+### Describe your data
+
+This file is shared between client and server - it contains no secrets and no database code, just the shape of your data and the operations it supports.
+
+```ts title="lib/data/issues.ts"
+import { z } from "zod";
+import { action, engine, resource } from "resourcekit";
+
+export const IssueSchema = z.object({
+  id: z.string().default(() => crypto.randomUUID()),
+  workspaceId: z.string(),
+  title: z.string(),
+  status: z.enum(["open", "closed"]),
+  assigneeId: z.string().nullable(),
+});
+
+export const issues = resource("issues", {
+  schema: IssueSchema,
+  actions: {
+    assign: action(z.object({ userId: z.string().nullable() }), ({ input }) => ({
+      assigneeId: input.userId,
+    })),
+  },
+});
+
+export const appData = engine({
+  resources: [issues],
+  endpoint: "/sync",
+});
+```
+
+</Step>
+<Step>
+
+### Serve it
+
+The server side connects each resource to whatever actually stores it, and declares who may access what. This file is server-only.
+
+```ts title="app/sync/route.ts"
+import { server } from "resourcekit/server";
+import { drizzleBackbone } from "resourcekit/drizzle";
+import { appData } from "@/lib/data/issues";
+import { db, issuesTable } from "@/lib/db";
+import { getAuth } from "@/lib/auth";
+
+export const resourceServer = server(appData, {
+  ctx: async (req: Request) => ({ auth: await getAuth(req) }),
+  resources: {
+    issues: {
+      backbone: drizzleBackbone(db, issuesTable),
+      access: (ctx) => ({ workspaceId: { in: ctx.auth.workspaceIds } }),
+    },
+  },
+});
+
+export const POST = resourceServer.POST;
+```
+
+You hand the server the **same `appData` engine** the client uses, so the two can never disagree about which resources exist - it's the shared contract both sides build on. The `access` rule is required: a resource without one refuses all requests, and it's applied to every read and write automatically (see [Access control](/docs/guides/access-control)).
+
+<Callout type="info">
+  No database yet? Swap `drizzleBackbone(db, issuesTable)` for
+  `memoryBackbone({ seed: [...] })` from `resourcekit/memory` and build your UI
+  first.
+</Callout>
+
+</Step>
+<Step>
+
+### Use it
+
+Wrap your app in the provider once, then read and write from any component.
+
+```tsx title="app/providers.tsx"
+"use client";
+import { ResourceKitProvider } from "resourcekit/react";
+import { appData } from "@/lib/data/issues";
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return <ResourceKitProvider engine={appData}>{children}</ResourceKitProvider>;
+}
+```
+
+```tsx title="app/issues/issue-list.tsx"
+"use client";
+import { useAction, useSynced } from "resourcekit/react";
+import { issues } from "@/lib/data/issues";
+
+export function IssueList({ workspaceId }: { workspaceId: string }) {
+  const { data, status } = useSynced(issues.where({ workspaceId }));
+  const create = useAction(issues.create);
+
+  return (
+    <div>
+      {data.map((issue) => (
+        <p key={issue.id}>{issue.title}</p>
+      ))}
+      <button
+        onClick={() =>
+          create.run({
+            workspaceId,
+            title: "New issue",
+            status: "open",
+            assigneeId: null,
+          })
+        }
+      >
+        New issue
+      </button>
+    </div>
+  );
+}
+```
+
+That's the whole loop: the list renders from the local cache, the create appears instantly, and the server confirms in the background. Everything is typed end to end - `data` is `Issue[]`, `create.run` knows the record shape, and `issues.actions.assign` knows its input.
+
+</Step>
+</Steps>
+
+## Sensible defaults you can change later
+
+The setup above already gives you batched requests, optimistic writes, and stale-while-revalidate reads. Three options are worth knowing about from day one - each is a single line when you want it:
+
+```ts
+export const appData = engine({
+  resources: [issues],
+  endpoint: "/sync",
+  persist: "my-app",        // cache + offline writes survive reloads
+  live: "/sync/events",     // server pushes changes to all open clients
+  staleTime: 30_000,        // revalidate at most every 30s
+});
+```
+
+- [`persist`](/docs/guides/offline) stores the cache in IndexedDB, so a reload doesn't lose data - or queued offline writes.
+- [`live`](/docs/guides/live-updates) connects to a Server-Sent Events endpoint so edits made elsewhere appear without refetching.
+- `staleTime` controls how eagerly mounted queries revalidate (default: always).
+
+## Requirements
+
+- **TypeScript 5+** with `"strict": true` - the type inference is the product.
+- **Zod 4** for schemas.
+- Any server that speaks `Request`/`Response` (Next.js route handlers, Bun, Hono, Remix/React Router, …).
+- React 18+ for the hooks (the core works without React - see the [engine reference](/docs/reference/engine)).

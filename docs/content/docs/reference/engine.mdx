@@ -1,0 +1,109 @@
+---
+title: engine()
+description: The shared data contract - used by both the client and the server.
+---
+
+```ts
+import { engine } from "resourcekit";
+
+export const appData = engine({ resources, endpoint: "/sync" });
+```
+
+The engine is the **shared base both sides agree on** - define it once in module scope and use it everywhere:
+
+- **On the client** it's the runtime your UI talks to: it owns the cache, the offline queue, and the network channels.
+- **On the server** it's the contract `server(appData, …)` is built from, so the two can never list different resources or drift apart. (That's why it's the "engine", not a "client" - it's the engine both sides run on.)
+
+Use **one engine per signed-in identity** so caches never mix between accounts.
+
+## Configuration
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `resources` | `[...]` | *required* | Your app's resources. The server is built from this same engine, so the two can't drift. |
+| `endpoint` | `string` | `"/sync"` | Where the sync server is mounted |
+| `persist` | `string \| StorageDriver` | off | Durable cache + offline queue - see [Offline](/docs/guides/offline) |
+| `live` | `string \| connector` | off | Change notifications - see [Live updates](/docs/guides/live-updates) |
+| `staleTime` | `number \| "forever"` | `0` | How long synced data stays fresh before mounted queries revalidate |
+| `transport` | `Transport` | fetch | Custom request delivery (auth headers, tests) |
+| `cache` / `source` | backbone / `null` | built-in | Advanced: replace the cache, or `source: null` for a [local-only app](/docs/examples#local-only-apps) |
+
+### Custom transports
+
+The default transport POSTs JSON to `endpoint`. Provide your own to attach auth headers or intercept traffic:
+
+```ts
+import { engine, fetchTransport } from "resourcekit";
+
+engine({
+  resources,
+  transport: fetchTransport("/sync", {
+    headers: () => ({ authorization: `Bearer ${getToken()}` }),
+  }),
+});
+```
+
+A transport is just `(message) => Promise<response>` - throw `TransportError` for retryable network failures so offline handling engages.
+
+## Methods
+
+### `query(query)` - read once
+
+```ts
+const open = await appData.query(issues.where({ workspaceId, status: "open" }));
+const issue = await appData.query(issues.one(id));
+```
+
+Answers from the cache when the result is provably complete, asks the server otherwise, falls back to local data when offline. Refinements and includes apply.
+
+### `watch(query)` - subscribe without React
+
+The engine behind `useSynced`, for vanilla TS, other frameworks, or stores:
+
+```ts
+const live = appData.watch(issues.where({ workspaceId }));
+const stop = live.subscribe(() => render(live.getState()));
+// later:
+stop();
+```
+
+`getState()` returns the same `{ data, status, coverage, isRefreshing, error }` shape as the hook. The query activates on the first subscriber and releases on the last.
+
+### `mutate(write)` - write
+
+```ts
+await appData.mutate(issues.update(id, { title }));
+await appData.mutate(issues.actions.assign(id, { userId }));
+```
+
+Optimistic immediately; resolves with the server-confirmed result (after replay, if offline). In React, prefer [`useAction`](/docs/reference/react#useaction) for pending/error state.
+
+### `preload(bundle, input?)` - prefetch
+
+Warm the cache with a [bundle](/docs/guides/bundles) of queries - in a loader, on app start, or anywhere outside React. Resolves once every query has synced; rejects if any fail. Cheap to repeat (covered sets skip the network).
+
+```ts
+await appData.preload(workspaceData, { workspaceId });
+await appData.preload(referenceData); // bundle with no input
+```
+
+### Offline & lifecycle
+
+```ts
+appData.queuedWrites;          // writes waiting for the network
+await appData.flushWrites();   // try to deliver them now
+appData.refresh();             // force-refresh all active queries
+await appData.ready;           // persisted state restored (optional to await)
+appData.dispose();             // tear down timers and connections
+```
+
+## Debugging
+
+Every part of the runtime narrates itself through [`debug`](https://github.com/debug-js/debug), silent by default:
+
+```bash
+DEBUG=resourcekit:* bun dev              # server / Node / Bun
+localStorage.debug = "resourcekit:*"     # browser console, then reload
+```
+
+Namespaces: `resourcekit:engine` (read routing) · `:sync` (requests, refreshes) · `:writes` (the write lifecycle) · `:cache` (ingests, persistence) · `:live` (connections, notifications) · `:server` (handled plans).

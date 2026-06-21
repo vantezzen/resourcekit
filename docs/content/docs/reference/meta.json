@@ -1,0 +1,4 @@
+{
+  "title": "API Reference",
+  "pages": ["resource", "engine", "react", "server", "adapters", "errors"]
+}

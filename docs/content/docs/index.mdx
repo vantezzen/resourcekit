@@ -1,0 +1,57 @@
+---
+title: Introduction
+description: What ResourceKit is, and why your app's data layer can feel local without replacing your backend.
+---
+
+ResourceKit is a **full-stack data runtime for TypeScript apps**. You describe your data once - `issues`, `customers`, `files` - keep your existing database and backend, let the engine execute on Postgres, REST, S3, the Stripe API, ClickHouse, or wherever your data is and get:
+
+- **Reads that feel local.** Queries answer from a local cache instantly and refresh in the background. Searching, sorting, and relation joins run on data that's already on the device - no spinner per keystroke.
+- **Writes that feel instant.** The UI updates the moment the user acts; the server confirms in the background. If the network is down, writes queue up and replay once you're back online - even across page reloads.
+- **A server that stays in charge.** On the server, your resources are backed by whatever actually holds the data - a Postgres table via Drizzle, plain server code, an external API - all behind the same typed interface.
+- **Interconnect anywhere.** Define relationships not just in your database but between any resource anywhere, e.g. between your local `Workspace` table and your Stripe instances.
+
+Here's the whole loop - describe data, serve it, use it. The tabs are the three files you'd write; the preview is that exact app running live, right here in your browser (no server, persisted across reloads):
+
+<ResourceKitDemo />
+
+## How it fits into your stack
+
+ResourceKit is **not** a database, an ORM, or a hosted backend. It sits between your UI and the backend you already have:
+
+<Mermaid
+  chart="
+flowchart LR
+    subgraph app [Your app]
+        UI[Components] -->|hooks| EN[ResourceKit Client]
+    end
+    subgraph backend [Your backend]
+    EN <-->|/sync endpoint| SRV[ResourceKit Server]
+        SRV -->|access rules<br/>+ validation| PG[(Postgres)]
+    end"
+/>
+
+On the client, the **engine** owns a local cache and answers queries from it immediately, refreshing from the server behind the scenes. On the server, your resources are backed by whatever actually holds the data - a Postgres table via Drizzle, plain server code, an external API - all behind the same typed interface.
+
+## The one idea worth knowing
+
+Most of ResourceKit falls out of a single split:
+
+- The **filter you pass to `where()`** describes *which records to sync*. It's intentionally simple - equality, lists, ranges - because its only job is to move the right set of data to the device.
+- **Everything you chain after it** - `.filter()`, `.orderBy()`, `.limit()`, `.include()` - is plain TypeScript that runs *locally* against that synced set. It can be as rich as you like, because it never crosses the network.
+
+That's why search-as-you-type costs zero requests, why narrowing a synced list is instant, and why ResourceKit never grows into a query language you have to learn: local querying *is just TypeScript*.
+
+## What it's good at
+
+ResourceKit shines for **app-like products**: dashboards, project tools, admin panels, editors - anything where users work with a bounded set of data (their workspace, their account) and expect interactions to be immediate. It's incremental by design: start with one resource and a single endpoint, add actions, access rules, relations, offline persistence, and live updates only as you need them.
+
+It deliberately does **not** run arbitrary client SQL on the server, replace your migrations or auth, or promise offline access to data that was never synced.
+
+## Where to go next
+
+<Cards>
+  <Card title="Installation" href="/docs/installation" description="From zero to your first synced query in three files." />
+  <Card title="Reading data" href="/docs/guides/querying" description="Queries, local refinements, windows, and server-side search." />
+  <Card title="Writing data" href="/docs/guides/writing-data" description="Optimistic creates, updates, deletes, and typed actions." />
+  <Card title="Server Components" href="/docs/server/rsc" description="Using ResourceKit in RSC, route handlers, and loaders." />
+</Cards>

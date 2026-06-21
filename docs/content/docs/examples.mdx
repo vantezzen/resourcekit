@@ -1,0 +1,136 @@
+---
+title: Examples
+description: Recognizable patterns, ready to adapt - plus a runnable playground.
+---
+
+## The playground
+
+The repository ships a runnable demo app (`playground/`) that exercises everything at once: one typed API over three very different stores - `tasks` in **Postgres** (via Drizzle), `comments` in **MongoDB**, and the `members` directory in **Redis** - plus access scopes with a user switcher; offline simulation with visible queue depth; persistence across reloads; live updates between windows; conflicts; relations; and server search. The client speaks the same plans to all three; only the server's backbone wiring differs.
+
+```bash
+git clone https://github.com/vantezzen/resourcekit
+cd resourcekit && bun install
+bun run --cwd playground db:up && bun run --cwd playground db:migrate && bun run --cwd playground db:seed
+bun run dev
+```
+
+The patterns below are the same ideas, isolated.
+
+## Search-as-you-type, zero requests
+
+Sync the screen's set once; refine locally per keystroke.
+
+```tsx
+function IssueSearch({ workspaceId }: { workspaceId: string }) {
+  const [text, setText] = useState("");
+  const { data } = useSynced(
+    issues
+      .where({ workspaceId })
+      .filter((i) => i.title.toLowerCase().includes(text.toLowerCase()))
+      .orderBy("title"),
+  );
+
+  return (
+    <>
+      <input value={text} onChange={(e) => setText(e.target.value)} />
+      {data.map((issue) => <Row key={issue.id} issue={issue} />)}
+    </>
+  );
+}
+```
+
+## An assignment dropdown (two resources, one action)
+
+The members list feeds the dropdown; the action applies optimistically.
+
+```tsx
+function AssigneeSelect({ issue }: { issue: Issue }) {
+  const { data: team } = useSynced(members.where());
+  const assign = useAction(issues.actions.assign);
+
+  return (
+    <select
+      value={issue.assigneeId ?? ""}
+      onChange={(e) =>
+        assign.run(issue.id, { userId: e.target.value || null })
+          .catch((err) => toast.error(err.message))
+      }
+    >
+      <option value="">Unassigned</option>
+      {team.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+    </select>
+  );
+}
+```
+
+## An offline indicator
+
+```tsx
+function ConnectionStatus() {
+  const engine = useEngine();
+  const { status } = useSynced(issues.where({ workspaceId: "w1" }));
+
+  if (status !== "offline" && engine.queuedWrites === 0) return null;
+  return (
+    <button onClick={() => engine.flushWrites()}>
+      Offline - {engine.queuedWrites} change(s) will sync when you're back
+    </button>
+  );
+}
+```
+
+## A big list, windowed
+
+Don't sync 100k rows - window the set, keep the rest server-side via search:
+
+```tsx
+const { data } = useSynced(
+  tasks.where({ projectId }).take(200, "updatedAt", "desc"),
+);
+// need something outside the window? that's what named queries are for:
+const { data: hits } = useSynced(tasks.queries.search({ projectId, text }));
+```
+
+## Local-only apps
+
+No server at all - `source: null` makes the cache authoritative, `persist` makes it durable. A complete offline notes app:
+
+```ts
+const notes = resource("notes", {
+  schema: z.object({
+    id: z.string().default(() => crypto.randomUUID()),
+    text: z.string(),
+    done: z.boolean().default(false),
+  }),
+});
+
+export const appData = engine({
+  resources: [notes],
+  source: null,
+  persist: "my-notes",
+});
+```
+
+Every hook and write works identically - add a real server later without touching the components.
+
+## Seeding a screen
+
+Want a whole workspace usable the moment it opens? Declare a [bundle](/docs/guides/bundles) of the sets it needs and preload it:
+
+```ts title="data/bundles.ts"
+import { bundle } from "resourcekit";
+import { issues, projects, members } from "./resources";
+
+export const workspaceData = bundle(({ workspaceId }: { workspaceId: string }) => [
+  issues.where({ workspaceId }),
+  projects.where({ workspaceId }),
+  members.where(),
+]);
+```
+
+```tsx
+const { ready } = usePreload(workspaceData, { workspaceId });
+// or, outside React: await appData.preload(workspaceData, { workspaceId });
+```
+
+The whole screen syncs in one batched request, and every narrower query against those sets - filtered, sorted, joined - then answers locally. With `persist`, the warmth carries to every future visit, including offline.

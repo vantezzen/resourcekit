@@ -1,0 +1,122 @@
+---
+title: Writing data
+description: Optimistic creates, updates, deletes - and typed actions for everything else.
+---
+
+Every write in ResourceKit follows the same lifecycle, and you never manage it yourself:
+
+1. **Applied instantly.** The local cache updates the moment you call the write - every visible query re-renders before any network happens.
+2. **Confirmed in the background.** The server validates, checks access, executes, and returns the canonical record, which replaces the optimistic guess.
+3. **Reverted if refused.** If the server says no, the optimistic change disappears and the error surfaces - no manual rollback code, ever.
+
+## The built-in writes
+
+Every resource has three:
+
+```ts
+issues.create({ workspaceId, title: "Ship it", status: "open", assigneeId: null });
+issues.update(issueId, { title: "Ship it 🚀" });
+issues.delete(issueId);
+```
+
+In React, bind them with `useAction` to get pending and error state:
+
+```tsx
+const create = useAction(issues.create);
+const remove = useAction(issues.delete);
+
+<button onClick={() => create.run({ workspaceId, title, status: "open", assigneeId: null })}>
+  {create.isPending ? "Creating…" : "Create"}
+</button>
+```
+
+`run(...)` resolves with the server-confirmed record - await it when you need the result, or fire and forget; the UI is already updated either way. Outside React, the same writes go through `appData.mutate(...)`.
+
+<Callout type="info">
+Give the `id` a schema default (`z.string().default(() => crypto.randomUUID())`) and `create()` callers can omit it entirely.
+</Callout>
+
+## Actions: writes with a name
+
+Real apps quickly outgrow "patch some fields": *assign*, *archive*, *publish*, *approve*. **Actions** give those operations a name, a typed input, and a single definition both sides understand.
+
+```ts
+issues.actions.assign("iss_1", { userId: "user_9" });
+// ✓ fully typed against the action's input schema
+
+issues.actions.assign("iss_1", { userId: 42 });
+// ✗ Type 'number' is not assignable to type 'string | null'
+```
+
+### Declarative actions
+
+Most actions are a **patch derived from the input and the current record**. Pass that derivation as the second argument:
+
+```ts
+actions: {
+  assign: action(z.object({ userId: z.string().nullable() }), ({ input }) => ({
+    assigneeId: input.userId,
+  })),
+
+  // The patch can depend on the record's current state:
+  toggle: action(z.object({}), ({ record }) => ({
+    status: record.status === "open" ? "closed" : "open",
+  })),
+}
+```
+
+Declarative actions get the full optimistic treatment - applied locally against the cached record, re-derived on the server against the canonical record (so a stale client can never write a wrong patch), and **replayed automatically if performed offline**.
+
+### Server-only actions
+
+Some operations are business logic that must not run on a client - charging a card, sending an email, duplicating a record. Declare them with `null` and implement them in the server config:
+
+```ts title="shared"
+actions: {
+  duplicate: action(z.object({}), null),
+}
+```
+
+```ts title="server"
+resources: {
+  issues: {
+    backbone: drizzleBackbone(db, issuesTable),
+    access: byWorkspace,
+    actions: {
+      duplicate: async ({ id, input, record, ctx }) => {
+        const copy = { ...record, id: crypto.randomUUID(), title: `${record.title} (copy)` };
+        const [row] = await db.insert(issuesTable).values(copy).returning();
+        return row;
+      },
+    },
+  },
+},
+```
+
+TypeScript requires the implementation whenever a resource declares a server-only action - you can't forget it. These actions have no optimistic preview (the client can't know the outcome), but if the implementation returns a record, it lands in every client cache the moment it confirms. By default they also **don't** replay after an offline period - "charge the customer" firing hours later is rarely what anyone wants. Opt in with `action(input, null, { offline: true })` if replaying is safe.
+
+## When writes fail
+
+`run()` rejects and `useAction` exposes what happened:
+
+```tsx
+const assign = useAction(issues.actions.assign);
+
+assign.error;       // the rejection, if any
+assign.isConflict;  // lost to a concurrent edit (see Conflicts)
+assign.reset();     // clear the error state
+```
+
+By the time the rejection surfaces, the optimistic change has already been rolled back - your error handling is purely about *telling the user*, not repairing state:
+
+```tsx
+onClick={() =>
+  assign.run(issue.id, { userId }).catch((e) => toast.error(e.message))
+}
+```
+
+Network failures are different from rejections: the write isn't rolled back, it's **queued** - see [Offline & persistence](/docs/guides/offline).
+
+## Ordering you can rely on
+
+Fire several writes in a row - even without awaiting - and they reach the server in the order you issued them. Writes issued together are batched into a single request, and a write issued while earlier ones are still queued waits its turn rather than overtaking them.

@@ -1,0 +1,142 @@
+---
+title: Adapters & extension points
+description: Backbones, storage drivers, transports, and live connectors.
+---
+
+ResourceKit is pluggable at four seams. Each is a small, documented interface with a built-in default - you only touch them when the defaults don't fit.
+
+## Backbones (server data)
+
+A backbone connects one resource to its data. Built-ins:
+
+```ts
+import { drizzleBackbone } from "resourcekit/drizzle";           // any Drizzle table (Postgres, SQLite, MySQL)
+import { prismaBackbone } from "resourcekit/prisma";             // a Prisma model delegate
+import { sqliteBackbone } from "resourcekit/sqlite";             // bun:sqlite, no Drizzle
+import { mongoBackbone } from "resourcekit/mongo";               // a MongoDB collection
+import { redisBackbone } from "resourcekit/redis";               // Redis as a key-value store
+import { stripeCustomerBackbone } from "resourcekit/stripe";     // Stripe — partial, typed per object
+import { memoryBackbone } from "resourcekit/memory";             // no database
+```
+
+Each takes a client or handle you already have - the library never bundles a database driver, so nothing heavy reaches your frontend:
+
+```ts
+prismaBackbone(prisma.task);                 // your Prisma model delegate
+mongoBackbone(db.collection("comments"));    // your mongodb Collection
+redisBackbone(redis);                        // your Bun/Redis client
+sqliteBackbone(new Database("app.db"), "tasks");
+stripeCustomerBackbone(stripe);             // typed factory — see "Stripe, in one line" below
+```
+
+Mix them freely - one app can serve `tasks` from Postgres, `comments` from MongoDB, and `members` from Redis behind the same typed API (that's exactly what the [playground](/docs/examples) does).
+
+### Partial backbones & capabilities
+
+Some stores can't do everything: Stripe has no general `where`, a blob store can't `update` in place. Such a resource declares its [supported operations](/docs/guides/resources#supported-operations), and the unsupported ones vanish from its type (a compile error) and are rejected by the server.
+
+### Stripe, in one line
+
+Because Stripe objects are standardized, the adapter ships **ready-made resources** - schema, mode, and capabilities already wired - plus typed backbones bound to the real `stripe` client. Integrating a Stripe object is two imports:
+
+```ts
+// resources.ts (shared - imports no Stripe SDK)
+import { stripeCustomerResource } from "resourcekit/stripe/resources";
+export const customers = stripeCustomerResource();
+
+// server.ts
+import Stripe from "stripe";
+import { stripeCustomerBackbone } from "resourcekit/stripe";
+
+const stripe = new Stripe(process.env.STRIPE_KEY!);
+// in the serve config:
+customers: { backbone: stripeCustomerBackbone(stripe), access: "public" },
+```
+
+`customers.one(id)` and `customers.update(id, …)` are typed and live; `customers.where` doesn't exist. Ready-made resources/backbones exist for `customer`, `subscription`, `product`, and `price`; the schemas cover commonly-synced fields and you can swap in your own. The `/resources` entry is pure data (no SDK), safe in shared/client code; the backbones live in `resourcekit/stripe`.
+
+### Writing your own
+
+Extend `SourceBackbone` and implement five operations. The server handles validation, access, actions, and named queries before your code runs - you only move data:
+
+```ts
+import { SourceBackbone, type ExecutionContext, type QueryPlan } from "resourcekit";
+
+class MyBackbone extends SourceBackbone {
+  canFulfill(plan: QueryPlan, exec: ExecutionContext): boolean {
+    return plan.type === "read" ? plan.op !== "named" : plan.op !== "action";
+  }
+
+  async execute(plan: QueryPlan, exec: ExecutionContext): Promise<unknown> {
+    const { identity } = exec.resources.get(plan.resource);
+    switch (plan.op) {
+      case "one":    return /* record by plan.id, or null */;
+      case "where":  return /* records matching plan.filter (+ plan.order / plan.limit) */;
+      case "create": return /* insert plan.record, return it */;
+      case "patch":  return /* merge plan.patch into plan.id, return result or null */;
+      case "delete": return /* remove plan.id, return null */;
+    }
+  }
+}
+```
+
+`matchesFilter(record, filter)` from `resourcekit` evaluates the wire filter language for you (the memory backbone is a readable reference implementation). Verify behavior with the shared contract suite:
+
+```ts
+import { describe, test } from "bun:test";
+import { sourceBackboneContract } from "resourcekit/testing";
+
+describe("my backbone", () => {
+  for (const c of sourceBackboneContract(async () => ({ backbone: new MyBackbone() })))
+    test(c.name, c.run);
+});
+```
+
+Pass the suite and your backbone behaves identically to the built-ins - including window support and idempotent deletes.
+
+If your backbone is *partial* (it can't serve every operation), give the resources it backs a matching `supports` list - or ship a capability fragment (`{ mode, supports }`) consumers can spread in. That removes the unsupported methods from the type and lets the server reject any stray plan with an `unsupported` error.
+
+## Storage drivers (client persistence)
+
+`persist` accepts a name (built-in IndexedDB) or a driver - two functions:
+
+```ts
+import type { PersistedCache, StorageDriver } from "resourcekit";
+
+const sqliteDriver: StorageDriver = {
+  load: async () => readBlob(),                  // PersistedCache | null
+  save: async (state: PersistedCache) => writeBlob(state),
+};
+```
+
+State is plain JSON; saves are debounced write-behind. Useful for Electron (SQLite), React Native, CLIs, or encrypted storage.
+
+## Transports (client networking)
+
+How sync messages reach the server:
+
+```ts
+import { fetchTransport, TransportError, type Transport } from "resourcekit";
+
+const transport: Transport = async (message) => {
+  // deliver `message`, return the parsed response
+  // throw TransportError for retryable network failures
+};
+```
+
+The built-in `fetchTransport(endpoint, { headers })` covers auth headers; a fully custom transport enables websockets, IPC, or test harnesses (the test suite drives a real server through an in-process transport this way).
+
+## Live connectors (change notifications)
+
+`live` accepts a URL (built-in `EventSource`) or a connector:
+
+```ts
+import type { LiveConnector } from "resourcekit";
+
+const connector: LiveConnector = (onChange) => {
+  const sub = myRealtime.subscribe((msg) => onChange({ resource: msg.resource }));
+  return () => sub.close();
+};
+```
+
+Anything that can deliver `{ resource: string }` to the client can drive live updates.

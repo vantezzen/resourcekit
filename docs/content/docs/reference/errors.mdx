@@ -1,0 +1,57 @@
+---
+title: Errors
+description: Every failure carries a stable code - here's what each one means.
+---
+
+All ResourceKit errors extend `ResourceKitError` and carry a stable `code`. Codes survive the network - an error raised on the server arrives at the client with its meaning intact.
+
+```ts
+import { ResourceKitError } from "resourcekit";
+
+try {
+  await assign.run(id, { userId });
+} catch (error) {
+  if (error instanceof ResourceKitError && error.code === "conflict") {
+    // someone else edited this record
+  }
+}
+```
+
+## Codes
+
+| Code | Means | Typical reaction |
+| --- | --- | --- |
+| `conflict` | The write lost to a concurrent edit; it was rolled back and the winner fetched | Tell the user - see [Conflicts](/docs/guides/conflicts) |
+| `access_denied` | Outside the caller's [access scope](/docs/guides/access-control), or the resource has no rule | Usually a bug in UI state - the user shouldn't have been able to try |
+| `invalid_input` | A record, patch, or input failed schema validation | Fix the form / the caller |
+| `not_found` | A write addressed a record that doesn't exist | Refresh the view |
+| `result_limit` | A read matched more rows than the server's `maxRows` | Narrow the filter or window with `.take(n)` |
+| `rejected` | The server refused for a business reason (e.g. a server-only action threw) | Show the message |
+| `unsupported` | The resource doesn't support this operation (e.g. `where` on a Stripe-backed resource) | A bug - the [typed API](/docs/guides/resources#supported-operations) normally prevents it; only a stale or hand-built plan reaches here |
+| `transport` | The network failed - **retryable**; writes queue instead of failing | Usually nothing: offline handling has it |
+| `unknown_resource` / `no_backbone` | Configuration mismatch between client and server | Fix the setup - these shouldn't reach production |
+| `internal` | Anything unexpected server-side | Log it |
+
+## Error classes
+
+Common cases also have classes for `instanceof` checks:
+
+```ts
+import {
+  ConflictError,
+  AccessDeniedError,
+  InvalidInputError,
+  NotFoundError,
+  MutationRejectedError,
+  TransportError,
+  UnsupportedOperationError,
+} from "resourcekit";
+```
+
+Checking `error.code` is equally valid and survives serialization boundaries - prefer it in generic handlers.
+
+## Where errors surface
+
+- **Reads**: `useSynced` exposes refresh failures as `error` (network loss isn't an error - it's `status: "offline"`).
+- **Writes**: the `run()` / `mutate()` promise rejects, and `useAction` mirrors it as `error` / `isConflict`. The optimistic change is already rolled back by then.
+- **Server-only code**: throw `ResourceKitError`s (or anything) from action and query implementations - the message travels to the client, the code defaults to `rejected`/`internal`.

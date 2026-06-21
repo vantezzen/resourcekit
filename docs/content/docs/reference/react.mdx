@@ -1,0 +1,108 @@
+---
+title: React hooks
+description: The resourcekit/react bindings.
+---
+
+```tsx
+import {
+  ResourceKitProvider,
+  useSynced,
+  useOne,
+  useAction,
+  useMutate,
+  useEngine,
+} from "resourcekit/react";
+```
+
+## `<ResourceKitProvider engine={...}>`
+
+Provides the engine to the tree. Wrap your app once, in a Client Component:
+
+```tsx
+<ResourceKitProvider engine={appData}>{children}</ResourceKitProvider>
+```
+
+## `useSynced(query)`
+
+Subscribe to any query - local data instantly, background refresh, automatic updates after every write.
+
+```tsx
+const { data, status, coverage, isRefreshing, error } = useSynced(
+  issues.where({ workspaceId }).filter((i) => i.title.includes(search)),
+);
+```
+
+| Field | Type | |
+| --- | --- | --- |
+| `data` | `T[]` for `where()`, `T \| null` for `one()` | Empty array / `null` while loading - never `undefined` |
+| `status` | `"loading" \| "stale" \| "fresh" \| "offline"` | What you're looking at |
+| `coverage` | `"complete" \| "partial" \| "unknown"` | Whether the local set is provably whole |
+| `isRefreshing` | `boolean` | A background refresh is in flight |
+| `error` | `Error \| null` | Last non-network refresh error |
+
+Good to know:
+
+- **Components sharing a query share one request** - render the same `where()` in ten places, the network sees it once.
+- **Inline predicates are free.** `.filter()` callbacks may close over props and state; changing them re-evaluates locally without refetching or resubscribing.
+- Built on `useSyncExternalStore` - concurrent-rendering safe, StrictMode safe.
+
+## `useOne(resource, id)`
+
+Shorthand for `useSynced(resource.one(id))`.
+
+```tsx
+const { data: issue } = useOne(issues, issueId);
+```
+
+## `useAction(write)`
+
+Bind any write - built-ins or actions - with pending/error state:
+
+```tsx
+const assign = useAction(issues.actions.assign);
+const create = useAction(issues.create);
+
+await assign.run(issue.id, { userId });
+```
+
+| Field | |
+| --- | --- |
+| `run(...args)` | Executes the write; UI updates instantly, promise resolves with the confirmed result |
+| `isPending` | A run is awaiting confirmation |
+| `error` | The last rejection (already rolled back) |
+| `isConflict` | The last run lost to a [concurrent edit](/docs/guides/conflicts) |
+| `reset()` | Clear the error state |
+
+Pass the resource method itself (`issues.actions.assign`, `issues.create`) rather than an inline arrow, so `run` stays referentially stable across renders.
+
+## `useMutate()`
+
+The engine's `mutate`, for writes that don't need per-call state:
+
+```tsx
+const mutate = useMutate();
+await mutate(issues.delete(id));
+```
+
+## `usePreload(bundle, input?)`
+
+Prefetch a [bundle](/docs/guides/bundles) of queries so a screen renders from cache. Runs on mount, re-runs when the input changes, and is cheap when the data is already local. Pass the input as the second argument (omit it for bundles that take none).
+
+```tsx
+const { status, ready, error } = usePreload(workspaceData, { workspaceId });
+```
+
+| Field | | |
+| --- | --- | --- |
+| `status` | `"loading" \| "ready" \| "error"` | Where the prefetch stands |
+| `ready` | `boolean` | `true` once every query in the bundle is synced (or already local) |
+| `error` | `Error \| null` | The first query that failed, if any |
+
+## `useEngine()`
+
+The engine from context - for `queuedWrites`, `flushWrites()`, `refresh()`, or anything else on the [engine API](/docs/reference/engine).
+
+```tsx
+const engine = useEngine();
+const queued = engine.queuedWrites;
+```

@@ -1,0 +1,84 @@
+---
+title: Bundles & preloading
+description: Prefetch the data a screen needs in one go, so it renders from cache.
+---
+
+By default each `useSynced` fetches the set it needs the first time it mounts. That's fine, but a screen with several queries then fires several first-load fetches, and the user watches them fill in one by one.
+
+A **bundle** is a named group of queries you prefetch together. Preload it when the screen opens and every query syncs in one batched request - so the components inside render from cache instead of spinners. It's an optional optimization: reach for it on the screens where the difference is worth it, ignore it everywhere else.
+
+## Declare a bundle
+
+Put bundles next to your resources. A bundle is just a function from some input to a list of queries:
+
+```ts title="data/bundles.ts"
+import { bundle } from "resourcekit";
+import { issues, projects, members } from "./resources";
+
+export const workspaceData = bundle(({ workspaceId }: { workspaceId: string }) => [
+  issues.where({ workspaceId }),
+  projects.where({ workspaceId }),
+  members.where(),
+]);
+```
+
+Anything you'd pass to `useSynced` can go in a bundle - filtered queries, `.include(...)`, windowed `.take(n)` queries, named queries. A bundle with no input is fine too:
+
+```ts
+export const referenceData = bundle(() => [members.where(), labels.where()]);
+```
+
+## Preload it in React
+
+```tsx
+import { usePreload } from "resourcekit/react";
+import { workspaceData } from "@/data/bundles";
+
+function Workspace({ workspaceId }: { workspaceId: string }) {
+  const { ready } = usePreload(workspaceData, { workspaceId });
+
+  if (!ready) return <WorkspaceSkeleton />;
+  return <WorkspaceBoard workspaceId={workspaceId} />;
+}
+```
+
+`usePreload` runs the bundle when the component mounts and re-runs whenever the input changes. You don't have to gate rendering on `ready` - the cards inside can mount immediately and show their own loading state; preloading just means they'll usually find their data already there. Use `ready` when you'd rather show one skeleton for the whole screen than several.
+
+```ts
+const { status, ready, error } = usePreload(workspaceData, { workspaceId });
+// status: "loading" | "ready" | "error"
+```
+
+For a bundle with no input, pass nothing:
+
+```tsx
+usePreload(referenceData);
+```
+
+## Preload outside React
+
+`engine.preload` is the same thing without the hook - ideal in a route loader, on app start, or in a server [session](/docs/server/rsc):
+
+```ts
+// Warm the cache before navigating, so the next screen is instant.
+await appData.preload(workspaceData, { workspaceId });
+
+// No input:
+await appData.preload(referenceData);
+```
+
+It resolves once every query has synced and rejects if any of them fail.
+
+## Why the screen is then instant
+
+Preloading records **coverage**: Once the set behind `issues.where({ workspaceId })` is synced, ResourceKit knows that set is complete locally, so:
+
+- The matching `useSynced` answers from cache with no request.
+- **Narrower** queries of that set answer locally too - `issues.where({ workspaceId }).filter(...)` or `.where({ workspaceId, status: "open" })` never hit the network.
+- With [`persist`](/docs/guides/offline) enabled, the warmth survives reloads, and the screen works offline on the next visit.
+
+Calling preload again is cheap: queries already covered locally skip the network entirely, so it's safe to preload on every mount or navigation.
+
+<Callout type="info">
+Bundles pair naturally with [windowing](/docs/guides/querying#large-sets-windows-with-take): preload `tasks.where({ projectId }).take(200, "updatedAt", "desc")` to warm the visible slice of a large set without syncing all of it.
+</Callout>

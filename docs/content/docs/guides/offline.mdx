@@ -1,0 +1,78 @@
+---
+title: Offline & persistence
+description: Writes queue and replay; one option makes everything survive reloads.
+---
+
+Offline handling is built into the write path - you don't enable it, it's just how writes work:
+
+1. The network drops. A write applies locally as always, then fails to send.
+2. Instead of erroring, it's **queued**. The UI keeps the optimistic state; the user keeps working; more writes queue behind it in order.
+3. The connection returns (the browser's `online` event, an exponential-backoff retry, or your own `flushWrites()` call). The whole queue ships as **one batched request**, applies in order, and confirms.
+
+Nothing in your component code changes between the online and offline paths.
+
+```tsx
+// Optional UI affordances:
+appData.queuedWrites;          // number of writes waiting for the network
+await appData.flushWrites();   // "retry now" button
+```
+
+## Surviving reloads: `persist`
+
+By default the cache lives in memory - a reload starts fresh, and queued offline writes would be lost. One option fixes both:
+
+```ts
+export const appData = engine({
+  resources,
+  endpoint: "/sync",
+  persist: "my-app",
+});
+```
+
+With `persist` set:
+
+- **The cache survives reloads.** Synced records - and the knowledge of *which sets are complete* - are stored in IndexedDB. A returning user sees their data instantly, before any network, including fully offline.
+- **Queued writes survive reloads.** Edits made offline are restored on startup, still visible optimistically, and replayed automatically once the network allows. Close the laptop on the train; everything lands when you're back.
+
+Persistence is write-behind and debounced - it never blocks reads or writes. Outside the browser (SSR, tests) it's a silent no-op, so the same engine config runs everywhere.
+
+```ts
+// Optional: wait for restoration (e.g. to avoid an initial skeleton).
+// Queries before readiness simply see an emptier cache - never wrong data.
+await appData.ready;
+```
+
+<Callout type="warn">
+If your app switches users without a reload, namespace the store per identity - `persist: "my-app" + userId` - so accounts never share a cache.
+</Callout>
+
+### Custom storage
+
+`persist` also accepts a `StorageDriver` - two functions, `load()` and `save(state)` - if you want the cache somewhere else (SQLite in Electron, a file in a CLI, encrypted storage):
+
+```ts
+import type { StorageDriver } from "resourcekit";
+
+const driver: StorageDriver = {
+  load: async () => readStateSomehow(),
+  save: async (state) => writeStateSomehow(state),
+};
+
+engine({ resources, persist: driver });
+```
+
+## What replays - and what doesn't
+
+Replaying a write hours later is only safe if the write still means the same thing:
+
+| Write | Replays after offline? |
+| --- | --- |
+| `create` / `update` / `delete` | **Yes** - they carry their full intent |
+| Declarative actions | **Yes** (default) - they're pure patches |
+| Server-only actions | **No** (default) - replaying "charge the customer" later is rarely intended; they fail immediately offline instead |
+
+Override per action with `action(input, run, { offline: true | false })`.
+
+## What offline reads can promise
+
+Reads never invent data: offline, you get what was synced, honestly labeled. `status` becomes `"offline"` (data still shown), and `coverage` tells you whether the local set is complete. If a screen must work offline, make sure its queries run at least once while online - with `persist`, once is enough, ever.

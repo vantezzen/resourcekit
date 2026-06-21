@@ -1,0 +1,101 @@
+---
+title: resource()
+description: Resources, actions, relations, and named queries - the shared definitions.
+---
+
+```ts
+import { resource, action, namedQuery, one, many } from "resourcekit";
+```
+
+## `resource(name, config)`
+
+Defines a resource and returns its typed API.
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `schema` | `z.ZodObject` | *required* | Shape of one record |
+| `identity` | field name | `"id"` | The field records are addressed by |
+| `mode` | `"collection" \| "document" \| "snapshot" \| "blob" \| "connection"` | `"collection"` | Local caching behavior - see [Defining resources](/docs/guides/resources#modes) |
+| `supports` | `("one" \| "where" \| "create" \| "update" \| "delete")[]` | all five | Which operations exist on the resource - see [Supported operations](/docs/guides/resources#supported-operations). Unsupported ones are omitted from the type |
+| `version` | field name | - | Numeric field enabling [conflict detection](/docs/guides/conflicts) |
+| `actions` | record of `action(...)` | `{}` | Typed write operations |
+| `relations` | record of `one()/many()` | `{}` | Connections for [`include()`](/docs/guides/relations) |
+| `queries` | record of `namedQuery(...)` | `{}` | Typed server-implemented reads |
+
+### The resource API
+
+```ts
+issues.one(id)                      // Query<Issue | null>
+issues.where(filter?)               // collection query (chainable, see below)
+
+issues.create(record)               // fields with schema defaults are optional
+issues.update(id, partial)
+issues.delete(id)
+
+issues.actions.assign(id, input)    // one per declared action
+issues.queries.search(input)        // one per declared named query
+```
+
+### Collection queries
+
+`where()` returns a chainable, immutable query. Wire-level (decides what syncs):
+
+```ts
+.take(n, field?, direction?)   // window the synced set to the top n
+```
+
+Local (runs on the device, never crosses the network):
+
+```ts
+.filter((record) => boolean)   // any predicate
+.orderBy(field, "asc" | "desc")
+.orderBy((a, b) => number)     // or a comparator
+.limit(n)
+.include("project", ...)       // join declared relations
+```
+
+### Filter syntax
+
+```ts
+{ status: "open" }                       // equality (shorthand)
+{ status: { eq: "open" } }               // equality (explicit)
+{ status: { in: ["open", "closed"] } }   // membership
+{ score: { gt: 0, lte: 100 } }           // ranges: gt / gte / lt / lte
+{ assigneeId: null }                     // null equality
+```
+
+Fields combine with AND. `undefined` values are dropped ("no constraint").
+
+## `action(input, run, options?)`
+
+| Argument | |
+| --- | --- |
+| `input` | Zod schema for the action's input |
+| `run` | `({ input, record }) => partialRecord` for declarative actions, or `null` for [server-only actions](/docs/guides/writing-data#server-only-actions) |
+| `options.offline` | Replay after an offline period - default `true` for declarative, `false` for server-only |
+
+## `namedQuery(input, output)`
+
+Declares a server-implemented read. `input` and `output` are Zod schemas; both are validated on both sides. Array outputs return refinable collection queries; other outputs resolve to `value | null`.
+
+## `one(target, field)` / `many(target, field)`
+
+Relation declarations. `target` is a lazy thunk (`() => projects`); `field` is the local foreign-key field for `one`, the target's foreign-key field for `many`. See [Relations](/docs/guides/relations).
+
+## `bundle(build)`
+
+```ts
+import { bundle } from "resourcekit";
+```
+
+Declares a group of queries to prefetch together. `build` maps an input to the queries to sync - anything you'd pass to `useSynced` (filtered, `.take(n)`, `.include(...)`, named queries). The input type is inferred from `build`; a bundle with no input is `bundle(() => [...])`.
+
+```ts
+export const workspaceData = bundle(({ workspaceId }: { workspaceId: string }) => [
+  issues.where({ workspaceId }),
+  projects.where({ workspaceId }),
+  members.where(),
+]);
+```
+
+Preload a bundle with [`engine.preload(bundle, input?)`](/docs/reference/engine#preloadbundle-input--prefetch) or the [`usePreload(bundle, input?)`](/docs/reference/react#usepreloadbundle-input) hook. See the [Bundles guide](/docs/guides/bundles).

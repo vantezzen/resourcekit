@@ -1,0 +1,101 @@
+---
+title: React Server Components & SSR
+description: The same queries, running on the server - RSC, route handlers, loaders, and scripts.
+---
+
+On the server, a **session** gives you the exact same typed API - same resources, same queries, same access enforcement - with an explicit context instead of a request in flight.
+
+```ts title="server.ts"
+const resourceServer = server(appEngine, { /* … */ });
+```
+
+```ts title="In a route handler, job, or React Server Component"
+const session = resourceServer.session({ user });
+
+const open = await session.query(issues.where({ workspaceId, status: "open" }));
+await session.mutate(issues.update(id, { status: "closed" }));
+```
+
+Everything you know from the client works here: filters, local refinements, `take()`, `include()`, named queries. And because a session runs through the same enforcement pipeline as the sync endpoint, **access rules apply on the server too** - a session can never read past its context's scope.
+
+## React Server Components
+
+The pattern for a Next.js App Router app:
+
+**Shared** code (resources and the engine) is imported by both sides. Client Components read and write through the hooks, behind a `"use client"` provider. **Server Components** read through a session built from the same engine.
+
+```tsx title="app/issues/page.tsx - a Server Component"
+import { resourceServer } from "@/lib/server/sync";
+import { issues } from "@/lib/data/issues";
+import { getUser } from "@/lib/auth";
+import { IssueBoard } from "./issue-board";
+
+export default async function IssuesPage() {
+  const session = resourceServer.session({ user: await getUser() });
+  const initial = await session.query(
+    issues.where({ workspaceId: "w1" }).orderBy("title"),
+  );
+
+  return (
+    <main>
+      <h1>{initial.length} issues</h1>
+      {/* Static parts render from server data … */}
+      {/* … interactive parts hydrate and go live on the client: */}
+      <IssueBoard workspaceId="w1" />
+    </main>
+  );
+}
+```
+
+```tsx title="app/issues/issue-board.tsx - a Client Component"
+"use client";
+import { useSynced } from "resourcekit/react";
+import { issues } from "@/lib/data/issues";
+
+export function IssueBoard({ workspaceId }: { workspaceId: string }) {
+  const { data, status } = useSynced(issues.where({ workspaceId }));
+  // live, optimistic, offline-capable - everything from the guides
+  return /* … */;
+}
+```
+
+A few rules of thumb:
+
+- **Server Components use sessions; Client Components use hooks.** The hooks are client-side reactive bindings - they need the provider and the browser - so in a Server Component, read through `resourceServer.session(...)` instead of calling a hook. The engine and resource definitions are safe to import anywhere (that's the whole point - `server(appEngine, …)` is built from the same engine).
+- **The session's ctx is yours to build.** In RSC there's no `Request` flowing through ResourceKit, so resolve auth however your framework does it (`cookies()`, `headers()`, your session helper) and pass the result to `session(...)`.
+- **Render-then-hydrate is the current model.** The server-rendered output uses session data; once the client mounts, hooks take over with the local cache (with [`persist`](/docs/guides/offline) enabled, often instantly warm from the last visit). Handing the RSC result *directly* to the client cache as initial data is on the roadmap - today the client refetches once on first mount.
+
+## Route handlers, loaders, jobs
+
+A session is just an object - use it anywhere server code runs:
+
+```ts title="a route handler"
+export async function GET(req: Request) {
+  const session = resourceServer.session({ user: await getUser(req) });
+  const stats = await session.query(reports.queries.usage({ range: "30d" }));
+  return Response.json(stats);
+}
+```
+
+```ts title="a background job / script"
+const session = resourceServer.session({ user: SYSTEM_USER });
+const stale = await session.query(
+  issues.where({ status: "open", updatedAt: { lt: cutoff } }),
+);
+for (const issue of stale) {
+  await session.mutate(issues.actions.nudge(issue.id, {}));
+}
+```
+
+Sessions are also the nicest way to test server behavior - no HTTP needed:
+
+```ts
+test("members can't see other workspaces", async () => {
+  const session = resourceServer.session({ user: { workspaceIds: ["w1"] } });
+  expect(await session.query(issues.where({ workspaceId: "w2" }))).toEqual([]);
+});
+```
+
+## What about caching on the server?
+
+Sessions read straight through to your backbones - there's no server-side ResourceKit cache, and there shouldn't be: the server *is* the source of truth, and your framework's own caching (RSC caching, `revalidate`, CDN) composes on top as usual.

@@ -1,0 +1,72 @@
+---
+title: Relations
+description: Connect resources and join them locally with include().
+---
+
+Relations describe how resources connect - an issue belongs to a project, an issue has many comments. Declare them once, and `.include()` joins the related records into your query results, fully typed and kept live.
+
+```ts title="lib/data/issues.ts"
+import { many, one, resource } from "resourcekit";
+import { projects } from "./projects";
+import { comments } from "./comments";
+
+export const issues = resource("issues", {
+  schema: IssueSchema,
+  relations: {
+    // this issue's projectId → a project's id
+    project: one(() => projects, "projectId"),
+    // comments whose issueId → this issue's id
+    comments: many(() => comments, "issueId"),
+  },
+});
+```
+
+```tsx
+const { data } = useSynced(
+  issues.where({ workspaceId }).include("project", "comments"),
+);
+
+data[0].project;   // Project | null
+data[0].comments;  // Comment[]
+```
+
+## How it works (and why it's fast)
+
+`include()` is **not** a server-side join. The runtime works out which related records the result needs, syncs them like any other set, and joins in memory:
+
+- The related records land in the same local cache as everything else - if the projects were already synced (say, for a sidebar), the join costs **zero additional requests**.
+- The join is **live**: rename a project, and every issue row showing it updates instantly - including the optimistic update before the server confirms.
+- Multiple components including the same relation share one synced set.
+
+This means relations never turn into an ORM problem: there are no join query plans, no N+1s against your database, and the server only ever sees ordinary set reads.
+
+## The two relation kinds
+
+| Helper | Reads as | Adds to each record |
+| --- | --- | --- |
+| `one(() => target, localField)` | "this record's `localField` points at one target" | `target \| null` |
+| `many(() => target, foreignField)` | "target records whose `foreignField` points at this record" | `target[]` |
+
+Targets are wrapped in `() =>` thunks so resource modules can reference each other without import-order problems.
+
+<Callout type="warn">
+Keep the *declared* relation graph acyclic: if `issues` declares a relation to `projects`, don't also declare one from `projects` back to `issues` - TypeScript's inference can't resolve mutually recursive resource types. In practice this costs nothing: the reverse direction is just a query (`issues.where({ projectId })`).
+</Callout>
+
+## Composing with everything else
+
+Includes compose with refinements - and the joined data is available to your predicates:
+
+```ts
+issues
+  .where({ workspaceId })
+  .include("project")
+  .filter((issue) => issue.project?.name.startsWith("Q3"))
+  .orderBy("title");
+```
+
+They work the same in one-shot reads (`appData.query(...)`) and on the server in [sessions](/docs/server/rsc).
+
+## Access control still applies
+
+Included records are fetched as ordinary reads, so the [access rules](/docs/guides/access-control) of the *related* resource apply. If the current user can't see a project, the join yields `null` for it - relations never become a side door.

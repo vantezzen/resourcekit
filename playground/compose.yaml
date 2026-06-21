@@ -1,4 +1,5 @@
 services:
+  # Relational core: tasks (versioned rows, conflict detection).
   postgres:
     image: postgres:17
     container_name: resourcekit-postgres
@@ -12,5 +13,24 @@ services:
     volumes:
       - resourcekit-postgres:/var/lib/postgresql/data
 
+  # Document store: comments (one document per comment).
+  mongo:
+    image: mongo:7
+    container_name: resourcekit-mongo
+    restart: unless-stopped
+    ports:
+      - "27018:27017"
+    volumes:
+      - resourcekit-mongo:/data/db
+
+  # Key-value store: the team directory, read on every board.
+  redis:
+    image: redis:7
+    container_name: resourcekit-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+
 volumes:
   resourcekit-postgres:
+  resourcekit-mongo:

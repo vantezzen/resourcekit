@@ -33,6 +33,18 @@ export default defineConfig({
         replacement: resolve(__dirname, "../src/adapters/drizzle/index.ts"),
       },
       {
+        find: "resourcekit/memory",
+        replacement: resolve(__dirname, "../src/adapters/memory/index.ts"),
+      },
+      {
+        find: "resourcekit/mongo",
+        replacement: resolve(__dirname, "../src/adapters/mongo/index.ts"),
+      },
+      {
+        find: "resourcekit/redis",
+        replacement: resolve(__dirname, "../src/adapters/redis/index.ts"),
+      },
+      {
         find: "resourcekit",
         replacement: resolve(__dirname, "../src/index.ts"),
       },

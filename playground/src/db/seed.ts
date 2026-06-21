@@ -1,35 +1,92 @@
 import { db } from "./client";
-import { issuesTable, projectsTable } from "./schema";
+import { commentsCollection } from "./mongo";
+import { tasksTable } from "./schema";
 
-await db.delete(issuesTable);
-await db.delete(projectsTable);
-
-await db.insert(projectsTable).values([
+// Tasks -> Postgres.
+await db.delete(tasksTable);
+await db.insert(tasksTable).values([
   {
-    id: "proj_1",
+    id: "t1",
     workspaceId: "w1",
-    name: "ResourceKit",
+    title: "Design the QueryPlan IR",
+    status: "done",
+    assigneeId: "ada",
   },
-]);
-
-await db.insert(issuesTable).values([
   {
-    id: "iss_1",
+    id: "t2",
     workspaceId: "w1",
-    projectId: "proj_1",
-    title: "Design QueryPlan",
-    status: "open",
+    title: "Build the local cache + outbox",
+    status: "in_progress",
+    assigneeId: "ada",
+  },
+  {
+    id: "t3",
+    workspaceId: "w1",
+    title: "Optimistic write pipeline",
+    status: "in_progress",
+    assigneeId: "linus",
+  },
+  {
+    id: "t4",
+    workspaceId: "w1",
+    title: "Offline replay on reconnect",
+    status: "todo",
+    assigneeId: "grace",
+  },
+  {
+    id: "t5",
+    workspaceId: "w1",
+    title: "Relations & local joins",
+    status: "todo",
     assigneeId: null,
   },
   {
-    id: "iss_2",
+    id: "t6",
     workspaceId: "w1",
-    projectId: "proj_1",
-    title: "Build local outbox",
-    status: "open",
-    assigneeId: "user_1",
+    title: "Live updates over SSE",
+    status: "todo",
+    assigneeId: "grace",
+  },
+  {
+    id: "t7",
+    workspaceId: "w1",
+    title: "Write the docs site",
+    status: "todo",
+    assigneeId: null,
   },
 ]);
 
-console.log("Seeded playground database");
+// Comments -> MongoDB (a document each).
+await commentsCollection.deleteMany({});
+await commentsCollection.insertMany([
+  {
+    id: "c1",
+    workspaceId: "w1",
+    taskId: "t2",
+    authorId: "linus",
+    body: "Snapshot + overlay is holding up nicely.",
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "c2",
+    workspaceId: "w1",
+    taskId: "t2",
+    authorId: "grace",
+    body: "Let's make sure rejected writes revert cleanly.",
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "c3",
+    workspaceId: "w1",
+    taskId: "t4",
+    authorId: "ada",
+    body: "Replays should preserve order.",
+    createdAt: new Date().toISOString(),
+  },
+]);
+
+// Members live in Redis - the server provisions them on boot, so there's
+// nothing to seed here.
+
+console.log("Seeded Postgres (tasks) and MongoDB (comments).");
 process.exit(0);

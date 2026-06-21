@@ -1,0 +1,70 @@
+---
+title: FAQ
+description: Common questions, honest answers.
+---
+
+## Do I have to replace my API?
+
+No - that's the point. ResourceKit adds one endpoint next to your existing routes. Adopt it for one resource on one screen; everything else stays as it is. There's no migration cliff in either direction.
+
+## Is this an ORM?
+
+No. The server never receives a query language to interpret - only "give me this set" (a simple filter), the five basic writes, and explicitly-declared named operations. Rich querying happens *on the device, in TypeScript*, against data that's already there. Your actual ORM (Drizzle, or anything behind a custom backbone) keeps its job.
+
+## How much data ends up on the client?
+
+Exactly the sets your queries ask for - nothing syncs speculatively. For bounded sets (a workspace, an account) that's typically the right amount. For large sets, [`take(n)`](/docs/guides/querying#large-sets-windows-with-take) windows what syncs, and the server's `maxRows` cap (default 1000 per read) makes oversized queries fail loudly rather than melt phones. The in-memory cache is comfortable well into tens of thousands of records.
+
+## What happens to writes made offline?
+
+They apply locally, queue in order, and replay as one batch when connectivity returns - surviving page reloads if [`persist`](/docs/guides/offline) is on. Business-critical server-only actions (think "charge the customer") deliberately don't replay unless you opt them in.
+
+## What if two users edit the same record?
+
+Without setup: last write wins, field-by-field - fine for low-contention data. With a declared [`version` field](/docs/guides/conflicts): the second writer gets a clean `conflict` error, their optimistic edit rolls back, and the winning record is fetched automatically. One schema field, no merge code.
+
+## Does it work with React Server Components?
+
+Yes - it's a first-class path. Server Components read through [`resourceServer.session(ctx)`](/docs/server/rsc) with full access enforcement; Client Components use the hooks. Resource definitions are shared and safe to import anywhere.
+
+## Does it work without React?
+
+Yes. The React package is a thin layer over `engine.watch(query)` (subscribe + `getState()`) and `engine.mutate(...)` - usable from vanilla TS, Vue, Svelte, or your own store. See the [engine reference](/docs/reference/engine).
+
+## Does it work without a server?
+
+Yes - `source: null` plus `persist` gives you a typed, reactive, durable local store with the same API. Add the server later without touching components. See [local-only apps](/docs/examples#local-only-apps).
+
+## Is the client trusted?
+
+Never. The server re-validates every record and input against your Zod schemas, applies [access rules](/docs/guides/access-control) to every operation (deny-by-default), and caps result sizes. Client-side validation exists purely for fast feedback.
+
+## Which databases are supported?
+
+The Drizzle adapter covers Postgres and SQLite (anything with `RETURNING`). Beyond that, a backbone is [five small methods](/docs/reference/adapters) with a contract test suite - MySQL, Mongo, an external API, or plain server code are all an afternoon, not a fork.
+
+## Can I deploy on Vercel / serverless?
+
+Yes. The sync endpoint is a stateless request handler. Live updates are designed for it - `EventSource` reconnects when the platform cuts the stream. The one caveat: on **multi-instance** deployments, bridge the change feed through your pub/sub so all instances announce all changes - [a few lines](/docs/guides/live-updates#serverless-platforms-vercel--friends), client unchanged.
+
+## Why is my list empty / why is `ctx` typed as `unknown`?
+
+The two most common setup trips:
+
+- **Empty list after switching users:** each engine has one cache. If your app switches identities without a reload, create one engine per user (with per-user `persist` names) - see [Access control](/docs/guides/access-control#one-cache-per-identity).
+- **`ctx` is `unknown` in access rules:** annotate the resolver's parameter - `ctx: async (req: Request) => …`. An unannotated parameter defers TypeScript's inference.
+
+## How do I see what it's doing?
+
+Everything narrates itself through [`debug`](https://github.com/debug-js/debug), off by default:
+
+```bash
+DEBUG=resourcekit:* bun dev              # server
+localStorage.debug = "resourcekit:*"     # browser, then reload
+```
+
+You'll see read routing, request batching, the write lifecycle, cache ingests, persistence, and live-update traffic - each in its own namespace.
+
+## What's deliberately *not* included?
+
+Arbitrary client SQL, automatic schema migrations, auth (bring your own - `ctx` is the seam), cross-resource transactions, and CRDT-style merging (versioned conflicts are detect-and-resolve, not auto-merge). Saying no to these is what keeps the library small enough to understand.

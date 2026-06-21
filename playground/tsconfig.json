@@ -8,6 +8,11 @@
       "resourcekit/react": ["../src/react/index.tsx"],
       "resourcekit/server": ["../src/server/index.ts"],
       "resourcekit/drizzle": ["../src/adapters/drizzle/index.ts"],
+      "resourcekit/memory": ["../src/adapters/memory/index.ts"],
+      "resourcekit/mongo": ["../src/adapters/mongo/index.ts"],
+      "resourcekit/redis": ["../src/adapters/redis/index.ts"],
+      "resourcekit/testing": ["../src/testing/contract.ts"],
     },
   },
+  "include": ["src", "vite.config.ts"],
 }

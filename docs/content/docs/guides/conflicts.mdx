@@ -1,0 +1,55 @@
+---
+title: Conflicts
+description: Concurrent edits collide cleanly instead of silently overwriting each other.
+---
+
+Two people open the same issue. Both edit the title. Without protection, whoever saves last silently destroys the other's work - and nobody finds out.
+
+Add a numeric version field to a resource and ResourceKit turns that silent overwrite into a **clean, recoverable conflict**:
+
+```ts
+export const issues = resource("issues", {
+  schema: IssueSchema.extend({
+    version: z.number().default(0),
+  }),
+  version: "version",
+});
+```
+
+That's the entire setup. (The field needs a column in your database too - an integer defaulting to `0`.)
+
+## What happens on a conflict
+
+Say Alice and Bob both have issue `iss_1` at version `3`:
+
+1. **Alice saves.** Her write was based on version 3, the server's record is at version 3 - accepted. The server bumps the record to version 4.
+2. **Bob saves.** His write was also based on version 3 - but the record is now at 4. The server **rejects** it with a `conflict` error.
+3. **Bob's client recovers automatically.** His optimistic edit is rolled back, and the winning record (Alice's version) is fetched and displayed.
+
+Nothing was overwritten, nothing is stuck - Bob is looking at the current truth and can redo his change on top of it.
+
+## What your UI should do
+
+Almost nothing. The rollback and the re-fetch already happened; you just tell the user:
+
+```tsx
+const rename = useAction(issues.update);
+
+useEffect(() => {
+  if (rename.isConflict) {
+    toast.warning("Someone else edited this issue - showing their version.");
+  }
+}, [rename.isConflict]);
+```
+
+`useAction` exposes `isConflict` for exactly this; the underlying error has `code: "conflict"` if you handle rejections yourself.
+
+## Behavior worth knowing
+
+- **Your own rapid edits never conflict with themselves.** Click "+1" five times fast, or queue edits offline - consecutive local writes to the same record are understood as building on each other, not as competing.
+- **The server owns the version.** It checks and bumps the field on every accepted write - never write to it yourself, from either side.
+- **Versioning is per-resource and opt-in.** Without a `version` field, concurrent edits use last-write-wins - fine for low-contention data, by design.
+
+## Choosing last-write-wins deliberately
+
+Not everything needs conflict detection. A "seen" flag, a sort position, a counter the server owns - last write winning is often *correct*. A reasonable default policy: add `version` to anything users open in an editor (long-lived form state, documents, titles and descriptions), skip it for ephemeral or single-owner fields.

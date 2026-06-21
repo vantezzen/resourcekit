@@ -1,0 +1,186 @@
+---
+title: Serving resources
+description: One server config connects every resource to its data - and enforces the rules.
+---
+
+The server side of ResourceKit is a single call. You hand it your **engine** - the same one the client uses - and, for each resource, three things: where the data lives, who may access it, and the implementations for any server-only operations. Building the server from the shared engine is what guarantees the two sides never disagree about which resources exist.
+
+```ts
+import { server } from "resourcekit/server";
+import { drizzleBackbone } from "resourcekit/drizzle";
+import { memoryBackbone } from "resourcekit/memory";
+import { appEngine } from "@/lib/data";
+
+const resourceServer = server(appEngine, {
+  ctx: async (req: Request) => ({ user: await getUser(req) }),
+
+  resources: {
+    issues: {
+      backbone: drizzleBackbone(db, issuesTable),
+      access: (ctx) => ({ workspaceId: { in: ctx.user.workspaceIds } }),
+      actions: { /* server-only action implementations */ },
+      queries: { /* named query implementations */ },
+    },
+    projects: {
+      backbone: drizzleBackbone(db, projectsTable),
+      access: (ctx) => ({ workspaceId: { in: ctx.user.workspaceIds } }),
+    },
+    members: {
+      backbone: memoryBackbone({ seed: TEAM }),
+      access: "public",
+    },
+  },
+});
+
+export const POST = resourceServer.POST;     // the sync endpoint
+export const GET = resourceServer.events;    // live updates (optional)
+```
+
+Everything a client can do flows through `POST`: the server validates each request against your schemas, applies [access rules](/docs/guides/access-control), resolves [actions](/docs/guides/writing-data) and [named queries](/docs/guides/querying#server-side-reads-named-queries), and hands clean, scoped operations to the backbone. Because the config is checked against the engine's resource definitions, TypeScript catches drift immediately - declare a server-only action or a named query on a resource, and the matching implementation here becomes *required*.
+
+## Backbones
+
+A **backbone** is the adapter that actually reads and writes a resource's data. Different resources can use different backbones behind the same client API.
+
+### Drizzle (Postgres / SQLite)
+
+```ts
+import { drizzleBackbone } from "resourcekit/drizzle";
+
+backbone: drizzleBackbone(db, issuesTable),
+```
+
+Maps reads and writes onto the table; column names follow your resource schema (including a custom `identity` field). Requires a Drizzle setup with `returning()` support - Postgres or SQLite.
+
+### Prisma
+
+```ts
+import { prismaBackbone } from "resourcekit/prisma";
+
+backbone: prismaBackbone(prisma.task),
+```
+
+Pass a model delegate from your generated client. The filter algebra maps onto a Prisma `where`; Prisma returns fully-typed values, so nothing is coerced.
+
+### MongoDB
+
+```ts
+import { mongoBackbone } from "resourcekit/mongo";
+
+backbone: mongoBackbone(db.collection("comments")),
+```
+
+A document per record; the filter language maps onto Mongo query operators. Pass your own collection - the library never bundles the `mongodb` driver.
+
+### Redis
+
+```ts
+import { redisBackbone } from "resourcekit/redis";
+
+backbone: redisBackbone(redis),
+```
+
+Each record is JSON at `"<resource>:<id>"`. Reads by id are direct `GET`s; `where` scans the resource's keys and filters locally, so keep these sets bounded. Works with `Bun.redis` or any client exposing `get/set/del/keys`.
+
+### bun:sqlite
+
+```ts
+import { sqliteBackbone } from "resourcekit/sqlite";
+
+backbone: sqliteBackbone(db, "tasks"),
+```
+
+Native SQLite via Bun, no Drizzle. Booleans and dates round-trip through the resource schema. Column names match the schema's fields.
+
+### In-memory
+
+```ts
+import { memoryBackbone } from "resourcekit/memory";
+
+backbone: memoryBackbone({ seed: [{ id: "u1", name: "Ada" }] }),
+```
+
+A complete backbone with no database behind it. Ideal for prototyping a UI before the schema settles, for small static datasets, and for tests.
+
+### External APIs (Stripe, …)
+
+```ts
+import { stripeCustomerBackbone } from "resourcekit/stripe";
+
+backbone: stripeCustomerBackbone(stripe),
+```
+
+A *partial* backbone: it serves `one` and `update` by id but has no `where`. Stripe ships [ready-made resources](/docs/reference/adapters#stripe-in-one-line) (`stripeCustomerResource()` and friends, from `resourcekit/stripe/resources`) with the schema and capabilities already wired - so the typed surface and the server agree on what's allowed, with no `supports` to write by hand.
+
+### Your own
+
+A backbone is a small class implementing five operations - read one, read a set, create, patch, delete. Validation, access control, actions, and named queries are all handled *before* a backbone is called, which is why adapters stay small (the Drizzle one is ~150 lines). A contract test suite is included so you can verify yours behaves identically:
+
+```ts
+import { describe, test } from "bun:test";
+import { sourceBackboneContract } from "resourcekit/testing";
+
+describe("my backbone", () => {
+  for (const c of sourceBackboneContract(setup)) test(c.name, c.run);
+});
+```
+
+See the [adapters reference](/docs/reference/adapters) for the full interface.
+
+## The context
+
+The `ctx` resolver runs once per request and feeds everything contextual: access rules, action implementations, named queries.
+
+```ts
+ctx: async (req: Request) => ({
+  user: await getUser(req),
+  db,
+}),
+```
+
+Resolve your session here, throw here if the request is unauthenticated, and keep the returned object lean - it's your server's dependency injection point.
+
+<Callout type="warn">
+Always annotate the parameter (`(req: Request)`). An unannotated parameter can defer TypeScript's inference and leave `ctx` typed as `unknown` in your access rules.
+</Callout>
+
+## Protecting the server
+
+Three guards are always on:
+
+- **Schema validation** - every incoming record and action input is parsed against your Zod schemas. Out-of-shape data never reaches a backbone.
+- **Access scopes** - applied to every operation; resources without a rule refuse everything.
+- **Row caps** - a single read may return at most `maxRows` (default 1000). Bigger results fail loudly with a `result_limit` error instead of silently truncating; clients should narrow their filter or window with `.take(n)`.
+
+```ts
+const resourceServer = server(appEngine, {
+  ctx,
+  maxRows: 5_000,   // raise or lower the cap
+  resources: { ... },
+});
+```
+
+## Mounting on your framework
+
+`POST` and `events` are plain `(request: Request) => Response` handlers, so they mount anywhere:
+
+```ts title="Next.js - app/sync/route.ts"
+export const POST = resourceServer.POST;
+```
+
+```ts title="Bun.serve"
+Bun.serve({
+  fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/sync" && req.method === "POST")
+      return resourceServer.POST(req);
+    if (url.pathname === "/sync/events") return resourceServer.events(req);
+    return new Response("Not found", { status: 404 });
+  },
+});
+```
+
+```ts title="Hono"
+app.post("/sync", (c) => resourceServer.POST(c.req.raw));
+app.get("/sync/events", (c) => resourceServer.events(c.req.raw));
+```

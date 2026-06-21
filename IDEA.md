@@ -315,11 +315,11 @@ They improve performance and offline completeness but are not required to use th
 A bundle contains normal resource queries:
 
 ```ts
-preload: ({ workspaceId }) => [
+const workspaceBundle = bundle({ workspaceId }) => [
   issues.where({ workspaceId }),
   projects.where({ workspaceId }),
   members.where({ workspaceId }),
-];
+]);
 ```
 
 When a bundle syncs successfully, ResourceKit records coverage: the runtime knows that certain queries are complete locally.

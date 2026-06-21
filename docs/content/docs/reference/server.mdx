@@ -1,0 +1,97 @@
+---
+title: server()
+description: The server runtime - configuration and the ResourceServer API.
+---
+
+```ts
+import { server } from "resourcekit/server";
+
+const resourceServer = server(appEngine, config);
+```
+
+The first argument is your **engine** - the same one the client uses. Building the server from the shared engine is what guarantees both sides agree on which resources exist, so prefer this form.
+
+A plain resource array (`server([issues, projects], …)`) is also accepted, for setups where there's no single client engine to share - a server-only service, or an app that builds a fresh engine per signed-in identity. Both sides should still import the **same `resources` array**, so the contract stays in one place.
+
+## Configuration
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `ctx` | `(req: Request) => TCtx \| Promise<TCtx>` | *required* | Per-request context - auth, db handles. **Annotate the parameter.** |
+| `resources` | map | *required* | One entry per resource (below) |
+| `maxRows` | `number` | `1000` | Hard cap per read; larger results fail with `result_limit` |
+
+### Per-resource entries
+
+| Option | | |
+| --- | --- | --- |
+| `backbone` | *required* | The data adapter - see [Serving resources](/docs/server/serving#backbones) |
+| `access` | *required* | `"public"` or `(ctx) => scopeFilter` - see [Access control](/docs/guides/access-control) |
+| `actions` | *required if declared* | Implementations for the resource's server-only actions |
+| `queries` | *required if declared* | Implementations for the resource's named queries |
+
+TypeScript enforces the "required if declared" rules - a resource with a server-only action won't compile without its implementation.
+
+### Implementation signatures
+
+```ts
+actions: {
+  duplicate: async ({ id, input, record, ctx }) => {
+    // `record` is the current canonical record (access-checked).
+    // Return value confirms to clients; if it's a record, caches merge it.
+  },
+},
+queries: {
+  search: async ({ input, ctx }) => {
+    // Return value is validated against the declared output schema.
+  },
+},
+```
+
+## The `ResourceServer`
+
+### `POST`
+
+The sync endpoint - a plain `(request: Request) => Promise<Response>` handler. Mount it wherever your framework takes one.
+
+```ts
+export const POST = resourceServer.POST;
+```
+
+### `events`
+
+A `GET` handler streaming change notifications as Server-Sent Events, for [live updates](/docs/guides/live-updates).
+
+```ts
+export const GET = resourceServer.events;
+```
+
+### `session(ctx)`
+
+The same typed read/write API, server-side, with an explicit context - for [RSC, loaders, jobs, and tests](/docs/server/rsc). Access rules apply.
+
+```ts
+const session = resourceServer.session({ user });
+await session.query(issues.where({ workspaceId }));
+await session.mutate(issues.update(id, { status: "closed" }));
+```
+
+### `changes`
+
+The change feed behind `events`. On multi-instance deployments, fan it out across instances with one call - see [Live updates](/docs/guides/live-updates#serverless-platforms-vercel--friends):
+
+```ts
+import Redis from "ioredis";
+import { redisChannel } from "resourcekit/server";
+
+resourceServer.changes.syncVia(redisChannel(new Redis(process.env.REDIS_URL)));
+```
+
+`syncVia(channel)` publishes local changes to the channel and emits remote ones locally, tagging each message with the originating instance so it never loops back on itself. Returns a stop function.
+
+Prebuilt channels from `resourcekit/server`:
+
+- **`redisChannel(client)`** - Redis pub/sub via `ioredis`, `node-redis`, or any managed Redis. Pass one client and it `duplicate()`s the connection for subscriber mode; or pass `{ publisher, subscriber, channel? }` explicitly (needed for `node-redis`, whose duplicated subscriber must be `connect()`ed first).
+- **`channel({ publish, subscribe })`** - wrap any string pub/sub (websocket hub, queue, realtime provider). `subscribe(onMessage)` returns an unsubscribe function.
+
+The raw feed is still available - `changes.subscribe(listener)` and `changes.emit(change)` - if you'd rather wire it by hand.
