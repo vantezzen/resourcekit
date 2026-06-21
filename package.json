@@ -1,6 +1,6 @@
 {
   "name": "resourcekit",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A full-stack data runtime for TypeScript apps: typed resources, instant local reads, optimistic writes with offline replay, and one sync endpoint - on top of your existing backend.",
   "license": "MIT",
   "repository": {
@@ -77,7 +77,8 @@
   "files": [
     "dist",
     "README.md",
-    "TECH.md"
+    "TECH.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "dev": "DEBUG=resourcekit:* bun --cwd playground dev",
