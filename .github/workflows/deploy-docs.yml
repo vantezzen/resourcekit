@@ -33,7 +33,7 @@ jobs:
         run: bun install
 
       - name: Build docs
-        run: bun --cwd docs run build
+        run: bun run --cwd docs build
 
       - uses: actions/configure-pages@v5
 
